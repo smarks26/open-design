@@ -11,6 +11,11 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 
 import { createPackagedSmokeReport } from '@/vitest/packaged-report';
 import { releaseAppVersionArgs } from '@/vitest/packaged-release-version';
+import {
+  applyPackagedUpdateEnv,
+  resolvePackagedUpdateScenario,
+  type PackagedUpdateScenario,
+} from '@/vitest/packaged-update-scenario';
 import { createDesktopHarness, STORAGE_KEY, waitFor } from '../lib/desktop/desktop-test-helpers.ts';
 
 const execFileAsync = promisify(execFile);
@@ -18,7 +23,9 @@ const e2eRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const workspaceRoot = dirname(e2eRoot);
 const toolsPackDir = resolveFromWorkspace(process.env.OD_PACKAGED_E2E_TOOLS_PACK_DIR ?? '.tmp/tools-pack');
 const namespace = process.env.OD_PACKAGED_E2E_NAMESPACE ?? 'release-beta';
+const releaseChannel = process.env.OD_PACKAGED_E2E_RELEASE_CHANNEL;
 const releaseVersion = process.env.OD_PACKAGED_E2E_RELEASE_VERSION;
+const updateScenario = resolvePackagedUpdateScenario({ releaseChannel, releaseVersion });
 const toolsPackReleaseVersionArgs = releaseAppVersionArgs(releaseVersion);
 const pnpmCommand = process.env.OD_E2E_PNPM_COMMAND ?? 'pnpm';
 const screenshotPath = join(toolsPackDir, 'screenshots', `${namespace}.png`);
@@ -182,12 +189,8 @@ macDescribe('packaged mac runtime smoke', () => {
       expectPathInside(install.dmgPath, join(outputNamespaceRoot, 'dmg'));
       expectPathInside(install.installedAppPath, join(outputNamespaceRoot, 'install', 'Applications'));
 
-      updaterFixture = await startUpdaterFixtureProcess();
-      process.env.OD_UPDATE_ENABLED = '1';
-      process.env.OD_UPDATE_METADATA_URL = updaterFixture.info.metadataUrl;
-      process.env.OD_UPDATE_CURRENT_VERSION = '99.0.0-beta.0';
-      process.env.OD_UPDATE_OPEN_DRY_RUN = '1';
-      process.env.OD_UPDATE_AUTO_CHECK = '1';
+      updaterFixture = await startUpdaterFixtureProcess(updateScenario);
+      applyPackagedUpdateEnv(process.env, updateScenario, updaterFixture.info.metadataUrl);
 
       const start = await runToolsPackJson<MacStartResult>('start');
       started = true;
@@ -214,7 +217,11 @@ macDescribe('packaged mac runtime smoke', () => {
       expect(value.href).toMatch(/^(od:\/\/app\/|http:\/\/127\.0\.0\.1:\d+\/)/);
       expect(value.status).toBe(200);
       expect(value.health.ok).toBe(true);
-      expect(value.health.version).toEqual(expect.any(String));
+      if (updateScenario.currentVersionOverride == null) {
+        expect(value.health.version).toBe(updateScenario.expectedCurrentVersion);
+      } else {
+        expect(value.health.version).toEqual(expect.any(String));
+      }
 
       const popup = await waitForUpdaterPopup();
       expect(popup.visible).toBe(true);
@@ -224,8 +231,8 @@ macDescribe('packaged mac runtime smoke', () => {
 
       const updateStatus = await runToolsPackJson<MacInspectResult>('inspect', ['--update-action', 'status']);
       expect(updateStatus.update?.state).toBe('downloaded');
-      expect(updateStatus.update?.channel).toBe('beta');
-      expect(updateStatus.update?.currentVersion).toBe('99.0.0-beta.0');
+      expect(updateStatus.update?.channel).toBe(updateScenario.channel);
+      expect(updateStatus.update?.currentVersion).toBe(updateScenario.expectedCurrentVersion);
       expect(updateStatus.update?.availableVersion).toBe(updaterFixture.info.version);
       expectPathInside(updateStatus.update?.downloadPath ?? '', join(runtimeNamespaceRoot, 'updates'));
 
@@ -1166,8 +1173,17 @@ function restoreUpdateEnv(previous: Partial<Record<(typeof UPDATE_ENV_KEYS)[numb
   }
 }
 
-async function startUpdaterFixtureProcess(): Promise<UpdaterFixtureProcess> {
-  const child = spawn(pnpmCommand, ['tools-serve', 'start', 'updater', '--json', '--channel', 'beta', '--version', '99.0.0-beta.1'], {
+async function startUpdaterFixtureProcess(scenario: PackagedUpdateScenario): Promise<UpdaterFixtureProcess> {
+  const child = spawn(pnpmCommand, [
+    'tools-serve',
+    'start',
+    'updater',
+    '--json',
+    '--channel',
+    scenario.channel,
+    '--version',
+    scenario.fixtureVersion,
+  ], {
     cwd: workspaceRoot,
     env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],

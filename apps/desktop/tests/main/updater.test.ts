@@ -296,11 +296,11 @@ describe("desktop updater", () => {
     }
   });
 
-  it("writes a pending installer observation before opening the installer", async () => {
+  it("writes a pending installer observation before arming a mac deferred installer launch", async () => {
     const root = makeRoot();
     const observationRoot = join(root, "observations", "installer");
     const fixture = await createUpdaterFixture();
-    const openedPaths: string[] = [];
+    const launches: Array<{ appPid: number; installerPath: string; root: string; timeoutMs: number }> = [];
     try {
       const updater = createDesktopUpdater(
         {
@@ -314,8 +314,8 @@ describe("desktop updater", () => {
           namespace: "release",
           source: SIDECAR_SOURCES.TOOLS_PACK,
         },
-        { openPath: async (path) => {
-          openedPaths.push(path);
+        { launchInstallerAfterQuit: async (input) => {
+          launches.push(input);
           return "";
         } },
       );
@@ -324,9 +324,15 @@ describe("desktop updater", () => {
       const installed = await updater.installUpdate();
       const flowIds = await readdir(observationRoot);
       const summary = JSON.parse(await readFile(join(observationRoot, flowIds[0] ?? "", "summary.json"), "utf8")) as Record<string, unknown>;
+      const updateRoot = await realpath(join(root, "updates"));
 
       expect(installed.installResult?.path).toBe(checked.downloadPath);
-      expect(openedPaths).toEqual([checked.downloadPath]);
+      expect(launches).toEqual([{
+        appPid: process.pid,
+        installerPath: checked.downloadPath,
+        root: updateRoot,
+        timeoutMs: 10 * 60 * 1000,
+      }]);
       expect(flowIds).toHaveLength(1);
       expect(summary).toMatchObject({
         arch: "arm64",
@@ -341,6 +347,51 @@ describe("desktop updater", () => {
         schemaVersion: 1,
         toVersion: "1.0.1",
       });
+    } finally {
+      await fixture.close();
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it("writes and detaches the mac helper script that opens the installer after quit", async () => {
+    const root = makeRoot();
+    const fixture = await createUpdaterFixture();
+    const spawned: Array<{ args: string[]; command: string }> = [];
+    try {
+      const updater = createDesktopUpdater(
+        {
+          arch: "arm64",
+          downloadRoot: root,
+          env: {
+            ...updaterEnv(fixture.metadataUrl),
+            [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: "0",
+          },
+          source: SIDECAR_SOURCES.TOOLS_PACK,
+        },
+        {
+          processPid: 4242,
+          spawnDetached: (command, args) => {
+            spawned.push({ args, command });
+            return { unref: vi.fn() };
+          },
+        },
+      );
+
+      const checked = await updater.checkForUpdates();
+      const installed = await updater.installUpdate();
+
+      expect(installed.installResult?.path).toBe(checked.downloadPath);
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0]?.command).toBe("/bin/sh");
+      const [scriptPath, pidArg, installerArg, timeoutArg] = spawned[0]?.args ?? [];
+      expect(scriptPath).toEqual(expect.stringContaining(join(root, "helpers", "open-installer-after-quit-")));
+      expect(pidArg).toBe("4242");
+      expect(installerArg).toBe(checked.downloadPath);
+      expect(timeoutArg).toBe("600");
+      const script = await readFile(scriptPath ?? "", "utf8");
+      expect(script).toContain('while kill -0 "$target_pid"');
+      expect(script).toContain('open "$installer_path"');
+      expect(script).toContain('rm -f "$0"');
     } finally {
       await fixture.close();
       rmSync(root, { force: true, recursive: true });

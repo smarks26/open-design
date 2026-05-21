@@ -42,6 +42,7 @@ export type UpdaterModel = {
   hasDownloadedInstaller: boolean;
   installerOpened: boolean;
   promptKey: string | null;
+  upToDate: boolean;
   shouldShowControl: boolean;
   shouldPrompt: boolean;
   status: OpenDesignHostUpdaterStatusSnapshot | null;
@@ -107,6 +108,7 @@ export function deriveUpdaterModel(
   const availableVersion = status?.availableVersion ?? null;
   const currentVersion = status?.currentVersion ?? null;
   const downloadProgress = downloadProgressFromStatus(status);
+  const upToDate = state === OPEN_DESIGN_HOST_UPDATER_STATES.NOT_AVAILABLE;
   const promptKey =
     status == null || availableVersion == null
       ? null
@@ -117,11 +119,10 @@ export function deriveUpdaterModel(
           status.downloadPath ?? status.artifactUrl ?? status.artifact?.url ?? 'unknown-artifact',
         ].join(':');
   const canQuitAfterInstallerOpen = hostAvailable && installerOpened;
-  const hasVisibleUpdaterState = Boolean(
+  const shouldShowControl = Boolean(
     hostAvailable &&
     status?.enabled &&
-    status.supported &&
-    (hasDownloadedInstaller || installerOpened),
+    status.supported,
   );
 
   return {
@@ -139,7 +140,8 @@ export function deriveUpdaterModel(
     hasDownloadedInstaller,
     installerOpened,
     promptKey,
-    shouldShowControl: hasVisibleUpdaterState,
+    upToDate,
+    shouldShowControl,
     shouldPrompt: canOpenInstaller && hasDownloadedInstaller && !installerOpened,
     status,
     supported: Boolean(status?.supported),

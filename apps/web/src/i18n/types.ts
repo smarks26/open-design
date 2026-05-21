@@ -671,6 +671,9 @@ export interface Dict {
 
   // Desktop updater
   'updater.available': string;
+  'updater.availableBody': string;
+  'updater.checking': string;
+  'updater.download': string;
   'updater.downloading': string;
   'updater.downloadingPercent': string;
   'updater.done': string;
@@ -688,6 +691,7 @@ export interface Dict {
   'updater.ready': string;
   'updater.readyGeneric': string;
   'updater.readyVersion': string;
+  'updater.upToDate': string;
 
   // Entry view / tabs
   'entry.tabDesigns': string;

@@ -54,6 +54,7 @@ import { DesignsTab } from './DesignsTab';
 import { DesignSystemPreviewModal } from './DesignSystemPreviewModal';
 import { DesignSystemsTab } from './DesignSystemsTab';
 import { EntryNavRail, type EntryView as EntryViewKind } from './EntryNavRail';
+import { UpdaterPopup } from './UpdaterPopup';
 import { GithubStarBadge } from './GithubStarBadge';
 import { HomeView } from './HomeView';
 import {
@@ -569,6 +570,7 @@ export function EntryShell({
                 </span>
               </button>
             </div>
+            <UpdaterPopup />
             {avatarMenu}
           </div>
           <div

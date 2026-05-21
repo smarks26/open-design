@@ -278,6 +278,12 @@
 .entry-updater-menu .entry-updater-menu__button.is-ready {
   animation: updater-ready-arrive 520ms cubic-bezier(0.23, 1, 0.32, 1) 1;
 }
+.entry-updater-menu .entry-updater-menu__button.is-current {
+  color: color-mix(in srgb, var(--green) 72%, var(--text-muted));
+  border-color: color-mix(in srgb, var(--green) 22%, var(--border));
+  background: color-mix(in srgb, var(--green-bg) 45%, var(--bg-panel));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--green) 8%, transparent);
+}
 .entry-updater-menu .entry-updater-menu__button.is-error {
   color: var(--red);
   border-color: color-mix(in srgb, var(--red) 42%, var(--border));
@@ -388,6 +394,12 @@
   border-color: color-mix(in srgb, var(--updater-accent-strong) 18%, var(--border));
   background: color-mix(in srgb, var(--updater-accent) 5%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--updater-accent-strong) 5%, transparent);
+}
+.entry-main__topbar .entry-updater-menu .entry-updater-menu__button.is-current {
+  color: color-mix(in srgb, var(--green) 76%, var(--text-muted));
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 }
 .entry-main__topbar .entry-updater-menu .entry-updater-menu__button:hover,
 .entry-main__topbar .entry-updater-menu .entry-updater-menu__button.is-active {

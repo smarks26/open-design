@@ -38,6 +38,13 @@ function downloadedStatus(overrides: Partial<OpenDesignHostUpdaterStatusSnapshot
   };
 }
 
+function notAvailableStatus(): OpenDesignHostUpdaterStatusSnapshot {
+  return {
+    ...idleStatus(),
+    state: 'not-available',
+  };
+}
+
 describe('UpdaterPopup', () => {
   let restoreHost: (() => void) | null = null;
 
@@ -99,6 +106,7 @@ describe('UpdaterPopup', () => {
     await act(async () => {
       await Promise.resolve();
     });
+    expect(await screen.findByTestId('entry-nav-updater')).toBeTruthy();
     expect(screen.queryByTestId('updater-popup')).toBeNull();
 
     act(() => {
@@ -106,6 +114,32 @@ describe('UpdaterPopup', () => {
     });
     expect(await screen.findByRole('dialog', { name: 'Update ready' })).toBeTruthy();
     expect(screen.getByTestId('entry-nav-updater')).toBeTruthy();
+  });
+
+  it('runs a manual check from the current-version control and shows the zh-CN no-update popup', async () => {
+    const check = vi.fn(async () => notAvailableStatus());
+    restoreHost = installMockOpenDesignHost({
+      host: {
+        updater: {
+          check,
+          status: vi.fn(async () => idleStatus()),
+        },
+      },
+    });
+
+    render(
+      <I18nProvider initial="zh-CN">
+        <UpdaterPopup />
+      </I18nProvider>,
+    );
+
+    const button = await screen.findByTestId('entry-nav-updater');
+    expect(button.className).toContain('is-current');
+    fireEvent.click(button);
+
+    await waitFor(() => expect(check).toHaveBeenCalledWith({ payload: { source: 'updater-popup:manual' } }));
+    expect(await screen.findByRole('dialog', { name: '您已经是最新版本啦' })).toBeTruthy();
+    expect(screen.getAllByText('您已经是最新版本啦').length).toBeGreaterThan(0);
   });
 
   it('uses localized updater copy from the app i18n provider', async () => {
@@ -203,7 +237,7 @@ describe('UpdaterPopup', () => {
     await waitFor(() => expect(quit).toHaveBeenCalledWith({ payload: { source: 'updater-popup' } }));
   });
 
-  it('hides the updater control while an update is downloading', async () => {
+  it('keeps the updater control visible while an update is downloading', async () => {
     restoreHost = installMockOpenDesignHost({
       host: {
         updater: {
@@ -223,9 +257,9 @@ describe('UpdaterPopup', () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.queryByTestId('entry-nav-updater')).toBeNull();
+    expect(await screen.findByTestId('entry-nav-updater')).toBeTruthy();
     expect(screen.queryByTestId('updater-popup')).toBeNull();
-    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('50');
   });
 
   it('keeps the popup open when opening the installer returns an updater error state', async () => {
@@ -283,7 +317,7 @@ describe('UpdaterPopup', () => {
     expect(screen.getByTestId('updater-quit-button')).toBeTruthy();
   });
 
-  it('keeps background update errors silent until an installer is ready', async () => {
+  it('keeps background update errors behind the updater control until the user opens it', async () => {
     restoreHost = installMockOpenDesignHost({
       host: {
         updater: {
@@ -304,7 +338,10 @@ describe('UpdaterPopup', () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.queryByTestId('entry-nav-updater')).toBeNull();
+    const button = await screen.findByTestId('entry-nav-updater');
     expect(screen.queryByTestId('updater-popup')).toBeNull();
+    fireEvent.click(button);
+    expect(await screen.findByRole('dialog', { name: 'Update failed' })).toBeTruthy();
+    expect(screen.getByText('update store contains unexpected root entries')).toBeTruthy();
   });
 });

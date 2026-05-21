@@ -3,7 +3,9 @@ import type { OpenDesignHostUpdaterStatusSnapshot } from '@open-design/host';
 
 import { Icon } from './Icon';
 import {
+  checkForUpdaterUpdate,
   deriveUpdaterModel,
+  downloadUpdaterUpdate,
   openUpdaterInstaller,
   quitAfterUpdaterInstallerOpen,
   readUpdaterStatus,
@@ -24,11 +26,13 @@ function versionText(t: Translator, model: UpdaterModel): string {
 function navLabel(t: Translator, model: UpdaterModel): string {
   if (model.errorMessage != null) return t('updater.failed');
   if (model.installerOpened) return t('updater.installerOpened');
+  if (model.status?.state === 'checking') return t('updater.checking');
   if (model.downloadProgress != null || model.busy) {
     const percent = model.downloadProgress?.percent;
     return percent == null ? t('updater.downloading') : t('updater.downloadingPercent', { percent });
   }
   if (model.hasDownloadedInstaller) return t('updater.ready');
+  if (model.upToDate || model.status?.state === 'idle') return t('updater.upToDate');
   return t('updater.available');
 }
 
@@ -56,6 +60,7 @@ export function UpdaterPopup() {
   const [panelOpen, setPanelOpen] = useState(false);
   const [installState, setInstallState] = useState<InstallState>('idle');
   const [actionError, setActionError] = useState<string | null>(null);
+  const [manualChecking, setManualChecking] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -113,6 +118,39 @@ export function UpdaterPopup() {
 
   if (model.environment !== 'desktop' || (!model.shouldShowControl && actionError == null)) return null;
 
+  const checkNow = async () => {
+    if (!model.canCheck || manualChecking) return;
+    setPanelOpen(true);
+    setManualChecking(true);
+    setActionError(null);
+    try {
+      const result = await checkForUpdaterUpdate({ payload: { source: 'updater-popup:manual' } });
+      if (result.ok) {
+        setModel(result.model);
+      } else {
+        setActionError(result.reason);
+      }
+    } finally {
+      setManualChecking(false);
+    }
+  };
+
+  const downloadNow = async () => {
+    if (!model.canDownload || manualChecking) return;
+    setManualChecking(true);
+    setActionError(null);
+    try {
+      const result = await downloadUpdaterUpdate({ payload: { source: 'updater-popup:manual-download' } });
+      if (result.ok) {
+        setModel(result.model);
+      } else {
+        setActionError(result.reason);
+      }
+    } finally {
+      setManualChecking(false);
+    }
+  };
+
   const requestQuitOpenDesign = async () => {
     setInstallState('quitting');
     setActionError(null);
@@ -161,24 +199,39 @@ export function UpdaterPopup() {
 
   const openingInstaller = installState === 'opening';
   const quitting = installState === 'quitting';
-  const actionInFlight = openingInstaller || quitting;
+  const actionInFlight = openingInstaller || quitting || manualChecking;
   const opened = installState === 'opened' || quitting || model.installerOpened;
   const statusError = model.errorMessage;
   const failed = actionError != null || statusError != null;
+  const checking = model.status?.state === 'checking' || (manualChecking && !model.hasDownloadedInstaller);
+  const updateAvailable = model.status?.state === 'available';
+  const current = model.upToDate || model.status?.state === 'idle';
   const title = failed
     ? opened
       ? t('updater.quitFailedTitle')
       : t('updater.failed')
     : opened
       ? t('updater.installerOpened')
-      : t('updater.ready');
+      : checking
+        ? t('updater.checking')
+        : current
+          ? t('updater.upToDate')
+          : model.hasDownloadedInstaller
+            ? t('updater.ready')
+            : t('updater.available');
   const body = failed
     ? opened
       ? t('updater.quitFailedBody')
       : statusError ?? t('updater.openFailedFallback')
     : opened
       ? t('updater.installerOpenBody')
-      : versionText(t, model);
+      : checking
+        ? t('updater.checking')
+        : current
+          ? t('updater.upToDate')
+          : model.hasDownloadedInstaller
+            ? versionText(t, model)
+            : t('updater.availableBody', { version: model.availableVersion ?? t('updater.ready') });
   const progress = model.downloadProgress;
   const progressStyle = {
     '--updater-progress': `${progress?.percent ?? 0}%`,
@@ -194,6 +247,8 @@ export function UpdaterPopup() {
     ? ' is-progress'
     : model.hasDownloadedInstaller
     ? ' is-ready'
+    : current
+    ? ' is-current'
     : ' is-available';
   const channelLabel = channelLabelFor(model.status?.channel);
 
@@ -214,11 +269,19 @@ export function UpdaterPopup() {
             close();
             return;
           }
+          if (!failed && !opened && !updateAvailable && !model.hasDownloadedInstaller && progress == null) {
+            void checkNow();
+            return;
+          }
           setPanelOpen(true);
         }}
       >
         <span className="entry-updater-menu__glyph">
-          <Icon name="arrow-up" size={18} strokeWidth={2.25} />
+          <Icon
+            name={model.hasDownloadedInstaller || progress != null || updateAvailable ? 'arrow-up' : 'check'}
+            size={18}
+            strokeWidth={2.25}
+          />
         </span>
         {progress != null ? (
           <span
@@ -241,7 +304,7 @@ export function UpdaterPopup() {
           role="dialog"
         >
           <div className="updater-popup__icon">
-            <Icon name={opened ? 'check' : 'arrow-up'} size={20} strokeWidth={2.2} />
+            <Icon name={opened || current ? 'check' : 'arrow-up'} size={20} strokeWidth={2.2} />
           </div>
           <div className="updater-popup__body">
             <h2 id="updater-popup-title">{title}</h2>
@@ -273,10 +336,30 @@ export function UpdaterPopup() {
                   </button>
                 </>
               )
-            ) : failed ? (
+            ) : failed || current ? (
               <button className="updater-popup__button" type="button" onClick={close}>
                 {t('updater.done')}
               </button>
+            ) : checking ? (
+              <button className="updater-popup__button updater-popup__button--primary" disabled type="button">
+                {t('updater.checking')}
+              </button>
+            ) : updateAvailable && !model.hasDownloadedInstaller ? (
+              <>
+                <button className="updater-popup__button" disabled={actionInFlight} type="button" onClick={close}>
+                  {t('updater.later')}
+                </button>
+                <button
+                  className="updater-popup__button updater-popup__button--primary"
+                  disabled={actionInFlight}
+                  type="button"
+                  onClick={() => {
+                    void downloadNow();
+                  }}
+                >
+                  {t('updater.download')}
+                </button>
+              </>
             ) : (
               <>
                 <button className="updater-popup__button" disabled={actionInFlight} type="button" onClick={close}>

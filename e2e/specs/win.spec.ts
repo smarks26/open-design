@@ -11,6 +11,11 @@ import { promisify } from 'node:util';
 import { describe, expect, test } from 'vitest';
 
 import { createPackagedSmokeReport } from '@/vitest/packaged-report';
+import {
+  applyPackagedUpdateEnv,
+  resolvePackagedUpdateScenario,
+  type PackagedUpdateScenario,
+} from '@/vitest/packaged-update-scenario';
 import { releaseAppVersionArgs, resolvePackagedWinInstallIdentity } from '@/vitest/packaged-win-identity';
 
 const execFileAsync = promisify(execFile);
@@ -22,7 +27,9 @@ const toolsPackBin = join(workspaceRoot, 'tools', 'pack', 'bin', 'tools-pack.mjs
 const toolsServeBin = join(workspaceRoot, 'tools', 'serve', 'bin', 'tools-serve.mjs');
 const maxInstallDurationMs = Number.parseInt(process.env.OD_PACKAGED_E2E_WIN_MAX_INSTALL_MS ?? '120000', 10);
 const verifyReinstallWhileRunning = process.env.OD_PACKAGED_E2E_WIN_VERIFY_REINSTALL !== '0';
+const releaseChannel = process.env.OD_PACKAGED_E2E_RELEASE_CHANNEL;
 const releaseVersion = process.env.OD_PACKAGED_E2E_RELEASE_VERSION;
+const updateScenario = resolvePackagedUpdateScenario({ releaseChannel, releaseVersion });
 const installIdentity = resolvePackagedWinInstallIdentity({ namespace, releaseVersion });
 const toolsPackReleaseVersionArgs = releaseAppVersionArgs(releaseVersion);
 
@@ -252,12 +259,8 @@ winDescribe('packaged windows runtime smoke', () => {
         );
       }
 
-      updaterFixture = await startUpdaterFixtureProcess();
-      process.env.OD_UPDATE_ENABLED = '1';
-      process.env.OD_UPDATE_METADATA_URL = updaterFixture.info.metadataUrl;
-      process.env.OD_UPDATE_CURRENT_VERSION = '99.0.0-beta.0';
-      process.env.OD_UPDATE_OPEN_DRY_RUN = '1';
-      process.env.OD_UPDATE_AUTO_CHECK = '1';
+      updaterFixture = await startUpdaterFixtureProcess(updateScenario);
+      applyPackagedUpdateEnv(process.env, updateScenario, updaterFixture.info.metadataUrl);
 
       let start = await measureSmokeStep(timings, 'start', async () => runToolsPackJson<WinStartResult>('start'));
       started = true;
@@ -276,7 +279,11 @@ winDescribe('packaged windows runtime smoke', () => {
       expect(value.href).toBe('od://app/');
       expect(value.status).toBe(200);
       expect(value.health.ok).toBe(true);
-      expect(value.health.version).toEqual(expect.any(String));
+      if (updateScenario.currentVersionOverride == null) {
+        expect(value.health.version).toBe(updateScenario.expectedCurrentVersion);
+      } else {
+        expect(value.health.version).toEqual(expect.any(String));
+      }
 
       const popup = await measureSmokeStep(timings, 'wait updater popup', async () => waitForUpdaterPopup());
       expect(popup.visible).toBe(true);
@@ -289,8 +296,8 @@ winDescribe('packaged windows runtime smoke', () => {
         runToolsPackJson<WinInspectResult>('inspect', ['--update-action', 'status']),
       );
       expect(updateStatus.update?.state).toBe('downloaded');
-      expect(updateStatus.update?.channel).toBe('beta');
-      expect(updateStatus.update?.currentVersion).toBe('99.0.0-beta.0');
+      expect(updateStatus.update?.channel).toBe(updateScenario.channel);
+      expect(updateStatus.update?.currentVersion).toBe(updateScenario.expectedCurrentVersion);
       expect(updateStatus.update?.availableVersion).toBe(updaterFixture.info.version);
       expectPathInside(updateStatus.update?.downloadPath ?? '', expectedUpdateRoot);
 
@@ -505,10 +512,21 @@ function restoreUpdateEnv(previous: Partial<Record<(typeof UPDATE_ENV_KEYS)[numb
   }
 }
 
-async function startUpdaterFixtureProcess(): Promise<UpdaterFixtureProcess> {
+async function startUpdaterFixtureProcess(scenario: PackagedUpdateScenario): Promise<UpdaterFixtureProcess> {
   const child = spawn(
     process.execPath,
-    [toolsServeBin, 'start', 'updater', '--json', '--channel', 'beta', '--version', '99.0.0-beta.1', '--platform', 'win'],
+    [
+      toolsServeBin,
+      'start',
+      'updater',
+      '--json',
+      '--channel',
+      scenario.channel,
+      '--version',
+      scenario.fixtureVersion,
+      '--platform',
+      'win',
+    ],
     {
       cwd: workspaceRoot,
       env: process.env,

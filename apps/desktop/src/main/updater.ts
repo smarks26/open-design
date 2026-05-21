@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import {
   access,
+  chmod,
   lstat,
   mkdir,
   readdir,
@@ -65,6 +67,7 @@ const STORE_METADATA_FILE = "metadata.json";
 const RELEASES_DIR = "releases";
 const STAGING_DIR = "staging";
 const BACK_DIR = ".back";
+const HELPERS_DIR = "helpers";
 const UPDATE_ROOT_VERSION = 1;
 const STORE_METADATA_VERSION = 1;
 const BETA_POLL_INTERVAL_MS = 15 * 60 * 1000;
@@ -72,6 +75,7 @@ const STABLE_POLL_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_POLL_INITIAL_DELAY_MS = 5000;
 const DEFAULT_POLL_BACKOFF_INITIAL_MS = 60 * 1000;
 const DEFAULT_POLL_BACKOFF_MAX_MS = 30 * 60 * 1000;
+const MAC_DEFERRED_INSTALLER_TIMEOUT_MS = 10 * 60 * 1000;
 const DESKTOP_UPDATE_CHANNEL_VALUES = new Set<string>(Object.values(DESKTOP_UPDATE_CHANNELS));
 
 export type DesktopUpdaterConfigInput = {
@@ -112,12 +116,28 @@ export type DesktopUpdaterConfig = {
 
 export type DesktopUpdaterDeps = {
   fetch?: typeof globalThis.fetch;
+  launchInstallerAfterQuit?: (input: DeferredInstallerLaunchInput) => Promise<string>;
   logger?: DesktopUpdaterLogger;
   now?: () => Date;
   openPath?: (path: string) => Promise<string>;
+  processPid?: number;
+  spawnDetached?: SpawnDetached;
 };
 
 type DesktopUpdaterLogger = Pick<Console, "error" | "warn">;
+type DetachedProcess = { unref(): void };
+type SpawnDetached = (
+  command: string,
+  args: string[],
+  options: { detached: true; stdio: "ignore"; windowsHide: true },
+) => DetachedProcess;
+
+export type DeferredInstallerLaunchInput = {
+  appPid: number;
+  installerPath: string;
+  root: string;
+  timeoutMs: number;
+};
 
 type UpdateCandidate = {
   arch: string;
@@ -932,6 +952,51 @@ async function ensureOwnedSubdir(root: string, name: string): Promise<string> {
   return realDir;
 }
 
+function macDeferredInstallerScript(): string {
+  return `#!/bin/sh
+set -eu
+target_pid="$1"
+installer_path="$2"
+timeout_seconds="$3"
+cleanup() {
+  rm -f "$0"
+}
+trap cleanup EXIT
+deadline=$(($(date +%s) + timeout_seconds))
+while kill -0 "$target_pid" 2>/dev/null; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    exit 1
+  fi
+  sleep 1
+done
+open "$installer_path" >/dev/null 2>&1 &
+exit 0
+`;
+}
+
+async function launchMacInstallerAfterQuit(
+  input: DeferredInstallerLaunchInput,
+  deps: { now: () => Date; spawnDetached: SpawnDetached },
+): Promise<string> {
+  try {
+    const helpersRoot = await ensureOwnedSubdir(input.root, HELPERS_DIR);
+    const suffix = `${deps.now().getTime().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const scriptPath = join(helpersRoot, `open-installer-after-quit-${suffix}.sh`);
+    await writeFile(scriptPath, macDeferredInstallerScript(), { encoding: "utf8", mode: 0o700 });
+    await chmod(scriptPath, 0o700);
+    const timeoutSeconds = Math.max(1, Math.ceil(input.timeoutMs / 1000)).toString();
+    const child = deps.spawnDetached(
+      "/bin/sh",
+      [scriptPath, input.appPid.toString(), input.installerPath, timeoutSeconds],
+      { detached: true, stdio: "ignore", windowsHide: true },
+    );
+    child.unref();
+    return "";
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 async function cleanupBackDirectory(root: string, logger: DesktopUpdaterLogger): Promise<void> {
   const backDir = join(root, BACK_DIR);
   const entry = await lstat(backDir).catch(() => null);
@@ -1067,6 +1132,9 @@ export function createDesktopUpdater(
   const logger = deps.logger ?? console;
   const now = deps.now ?? (() => new Date());
   const openPath = deps.openPath ?? (async () => "openPath is not available");
+  const processPid = deps.processPid ?? process.pid;
+  const spawnDetached: SpawnDetached = deps.spawnDetached ?? ((command, args, options) => spawn(command, args, options));
+  const launchInstallerAfterQuit = deps.launchInstallerAfterQuit ?? ((input) => launchMacInstallerAfterQuit(input, { now, spawnDetached }));
   const listeners = new Set<() => void>();
   let candidate: UpdateCandidate | null = null;
   let activeRelease: LoadedRelease | null = null;
@@ -1404,6 +1472,16 @@ export function createDesktopUpdater(
     }
   }
 
+  async function requestInstallerOpen(resolvedDownload: string, updateRoot: string): Promise<string> {
+    if (config.platform !== "darwin") return await openPath(resolvedDownload);
+    return await launchInstallerAfterQuit({
+      appPid: processPid,
+      installerPath: resolvedDownload,
+      root: updateRoot,
+      timeoutMs: MAC_DEFERRED_INSTALLER_TIMEOUT_MS,
+    });
+  }
+
   async function installUpdate(): Promise<DesktopUpdateStatusSnapshot> {
     const unsupported = unsupportedStatus();
     if (unsupported != null) return unsupported;
@@ -1448,7 +1526,7 @@ export function createDesktopUpdater(
       const openedAt = now().toISOString();
       observation = await writeInstallObservation(openedAt);
       if (!config.openDryRun) {
-        const openError = await openPath(resolvedDownload);
+        const openError = await requestInstallerOpen(resolvedDownload, opened.root.realRoot);
         if (openError.length > 0) {
           await markInstallObservationOpenFailed(observation, now().toISOString());
           return setState(DESKTOP_UPDATE_STATES.ERROR, createError("open-installer-failed", openError));
